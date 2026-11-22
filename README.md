@@ -32,3 +32,10 @@ Busca apenas lives **ativas** dos canais de notícias. Uma live pode não permit
 - O total de vídeos pode ultrapassar 500 porque `MAX_VIDEOS` é o limite **por canal**.
 - O app pode mostrar tudo na seção Filmes se sua integração Android atual não separar categorias por tipo. Para exibir TV ao vivo e Séries nas abas próprias, será necessária uma alteração posterior no Android.
 - Use somente conteúdo autorizado e respeite as condições do player incorporado do YouTube.
+
+## Identificadores verificados (22/11/2026)
+Os canais NetMovies, Filmelier TV BR, Swen Family Português e Cruel Istambul agora possuem IDs fixos verificados no YouTube. Os canais O2 Play e SBT Novelas ainda requerem confirmação de um ID de canal exato, por isso continuam com configuração opcional por `YOUTUBE_CHANNEL_O2PLAY` e `YOUTUBE_CHANNEL_SBTNOVELAS`. Não preencha com nomes presumidos.
+
+**Importante:** se já existir variável `YOUTUBE_CHANNEL_NETMOVIES`, `YOUTUBE_CHANNEL_FILMELIER`, `YOUTUBE_CHANNEL_SWENFAMILY` ou `YOUTUBE_CHANNEL_CRUELISTAMBUL` no Render, ela tem prioridade sobre o ID do código. Remova valores incorretos dessas variáveis.
+
+Para testar: acesse `/playlist.m3u` para atualizar quando o cache expirar (padrão: 6 horas) e depois `/health` para conferir a contagem. Reiniciar o serviço limpa o cache em memória e força uma nova busca na próxima consulta à playlist. A chave de API continua configurada somente no Render.
