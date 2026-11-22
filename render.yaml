@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: youtube-iptv-catalog
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 app:app
+    envVars:
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: YOUTUBE_CHANNEL_HANDLE
+        value: vportuguese
+      - key: CACHE_SECONDS
+        value: '21600'
+      - key: MAX_VIDEOS
+        value: '500'
