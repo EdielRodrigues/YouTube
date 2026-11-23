@@ -115,10 +115,74 @@ def get_catalog():
                       error='; '.join(errors) if errors else None,expires=time.time()+CACHE_SECONDS)
         return all_items
 
+# Series metadata is intentionally separate from the legacy M3U playlist.
+# M3U continues to expose every video so existing IPTV installations keep working.
+SERIES_NAMES = {'cruelistambul': 'Cruel Istambul', 'sbtnovelas': 'SBT Novelas'}
+EPISODE_RE = re.compile(r'(?i)(?:\bepis[oó]dio\s*(?:n[º°.]?\s*)?|\bcap[ií]tulo\s*(?:n[º°.]?\s*)?|\bep\.?\s*)(\d{1,4})\b')
+SEASON_RE = re.compile(r'(?i)(?:\btemporada\s*|\bt\s*)(\d{1,3})\b')
+
+
+def series_catalog(items):
+    """Group conservatively: an upload is not automatically a full episode."""
+    groups = {}
+    for video in items:
+        if video.get('kind') not in ('series', 'novelas'):
+            continue
+        channel_key = next((c['key'] for c in CHANNELS if c['name'] == video.get('channel')), None)
+        if not channel_key:
+            continue
+        # Dedicated Cruel Istambul channel is one show; SBT Novelas is a
+        # multi-show source and must not be collapsed into one fictitious show.
+        if channel_key == 'cruelistambul':
+            name, series_id = 'Cruel Istambul', 'youtube-series-cruelistambul'
+        else:
+            # Without verified show metadata, do not invent a series identity.
+            name, series_id = 'Não identificada — ' + video['channel'], 'youtube-unclassified-' + channel_key
+        group = groups.setdefault(series_id, {'id':series_id,'title':name,'source':video['channel'],
+            'poster':video.get('thumbnail'), 'seasons':{},'extras':[], 'needsReview':channel_key != 'cruelistambul'})
+        title = video.get('title','')
+        episode_match = EPISODE_RE.search(title)
+        season_match = SEASON_RE.search(title)
+        entry = {'id':video['id'],'title':title,'url':video['url'],
+                 'thumbnail':video.get('thumbnail'),'publishedAt':video.get('publishedAt','')}
+        if episode_match and channel_key == 'cruelistambul':
+            episode_number = int(episode_match.group(1))
+            season_number = int(season_match.group(1)) if season_match else None
+            entry['episodeNumber'] = episode_number
+            entry['seasonNumber'] = season_number
+            key = str(season_number) if season_number is not None else 'unknown'
+            season = group['seasons'].setdefault(key, {'seasonNumber':season_number,'episodes':[]})
+            season['episodes'].append(entry)
+        else:
+            entry['reason'] = 'episode_number_not_verified' if channel_key == 'cruelistambul' else 'show_not_identified'
+            group['extras'].append(entry)
+    result=[]
+    for group in groups.values():
+        seasons=list(group.pop('seasons').values())
+        for season in seasons:
+            season['episodes'].sort(key=lambda e:(e['episodeNumber'],e['publishedAt'],e['id']))
+        seasons.sort(key=lambda x:(x['seasonNumber'] is None,x['seasonNumber'] or 0))
+        group['seasons']=seasons
+        group['episodeCount']=sum(len(season['episodes']) for season in seasons)
+        group['extraCount']=len(group['extras'])
+        result.append(group)
+    return result
+
+
+@app.get('/series.json')
+def series_endpoint():
+    try: items = get_catalog()
+    except YoutubeError as exc: return jsonify({'error':str(exc)}),502
+    groups = series_catalog(items)
+    return jsonify({'updatedAt':_cache['updated'],'seriesCount':len(groups),
+                    'note':'Only explicitly numbered episodes are classified. Unverified videos are kept as extras.',
+                    'series':groups})
+
+
 def escape(value): return re.sub(r'[\r\n]+',' ',str(value)).replace('"',"'")
 
 @app.get('/')
-def home(): return jsonify({'service':'MEU IPTV Multi-Canais','routes':['/health','/playlist.m3u','/catalog.json'],'channels':len(CHANNELS)})
+def home(): return jsonify({'service':'MEU IPTV Multi-Canais','routes':['/health','/playlist.m3u','/catalog.json','/series.json'],'channels':len(CHANNELS)})
 
 @app.get('/health')
 def health():
