@@ -1,5 +1,6 @@
 import os, time, threading, re, json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify
 import requests
 
@@ -9,6 +10,14 @@ CACHE_SECONDS = max(300, int(os.getenv('CACHE_SECONDS', '21600')))
 MAX_PER_CHANNEL = max(1, min(5000, int(os.getenv('MAX_VIDEOS', '500'))))
 _lock = threading.Lock()
 _cache = {'expires': 0, 'items': [], 'updated': None, 'error': None, 'channels': []}
+_quota = {'retry_at': 0, 'message': None}
+
+def quota_retry_at():
+    # YouTube daily quota resets at midnight Pacific time.
+    pacific = datetime.now(ZoneInfo('America/Los_Angeles'))
+    tomorrow = (pacific + timedelta(days=1)).date()
+    return datetime.combine(tomorrow, datetime.min.time(), tzinfo=ZoneInfo('America/Los_Angeles')).timestamp() + 120
+
 
 # Every candidate requested is included. For entries without a verified channel ID/handle,
 # supply YOUTUBE_CHANNEL_<key> in Render. Never guess an identity from a channel name.
@@ -42,6 +51,10 @@ CHANNELS = [
  {'key': 'terrorbrfilmes', 'name': 'Terror BR Filmes', 'group': 'Filmes | Terror BR Filmes', 'type': 'filmes', 'id': 'UC8j0DBglRAFUIjcNYv5wV8A'},
  {'key': 'movieschanneloficial', 'name': 'Movies Channel Oficial', 'group': 'Filmes | Movies Channel Oficial', 'type': 'filmes', 'id': 'UCShWkr0wUHiGxQfOcpp0ZKg'},
  {'key': 'filmescompletosemportugues', 'name': 'Filmes Completos em Português', 'group': 'Filmes | Filmes Completos em Português', 'type': 'filmes', 'id': 'UCvZerT8gdBaKuJD8nYGfcDA'},
+ {'key':'cinenetportugal','name':'CiNENET Portugal','group':'Filmes | CiNENET Portugal','type':'filmes','id':'UC7d2tx1lbqbahKqH7kc2edg'},
+ {'key':'sangueosso','name':'Sangue & Osso','group':'Filmes | Sangue & Osso','type':'filmes','id':'UCQ3sWpbd4AQprk93YmwoiKg'},
+ {'key':'makinacultural','name':'MáKina Cultural','group':'Filmes | MáKina Cultural','type':'filmes','id':'UC2H8u7uUPBTRPHTQOcdk38w'},
+ {'key':'bigtimefilmes','name':'Bigtime - Filmes Completos','group':'Filmes | Bigtime','type':'filmes','id':'UCKUCcyav9Cwy8uaIEcaRTHQ'},
 ]
 
 class YoutubeError(Exception): pass
@@ -49,6 +62,8 @@ class YoutubeError(Exception): pass
 def api_get(resource, **params):
     key = os.getenv('YOUTUBE_API_KEY', '').strip()
     if not key: raise YoutubeError('YOUTUBE_API_KEY não configurada no Render')
+    if time.time() < _quota['retry_at']:
+        raise YoutubeError(_quota['message'] or 'Cota diaria esgotada')
     try:
         r = requests.get(f'{API}/{resource}', params={**params, 'key':key}, timeout=25)
         r.raise_for_status()
@@ -56,6 +71,15 @@ def api_get(resource, **params):
     except requests.HTTPError as e:
         try: message = r.json().get('error',{}).get('message','')
         except ValueError: message = r.text[:150]
+        if r.status_code == 403:
+            try:
+                reasons = [x.get('reason', '') for x in r.json().get('error', {}).get('errors', [])]
+            except ValueError:
+                reasons = []
+            if 'quotaExceeded' in reasons or 'dailyLimitExceeded' in reasons:
+                _quota['retry_at'] = quota_retry_at()
+                _quota['message'] = 'Cota diaria do YouTube atingida; aguardando renovacao automatica.'
+                raise YoutubeError(_quota['message']) from e
         raise YoutubeError(f'YouTube API HTTP {r.status_code}: {message}') from e
     except requests.RequestException as e:
         raise YoutubeError('Falha na conexão com a API YouTube') from e
@@ -129,6 +153,11 @@ def get_catalog():
         previous = {}
         for old in _cache['items']: previous.setdefault(old['channel'],[]).append(old)
         for channel in CHANNELS:
+            if time.time() < _quota['retry_at']:
+                retained = previous.get(channel['name'], [])
+                all_items.extend(retained)
+                statuses.append({'name':channel['name'],'key':channel['key'],'count':len(retained),'status':'quota_wait','message':_quota['message']})
+                continue
             try:
                 info, issue = resolve(channel)
                 if issue: raise YoutubeError(issue)
@@ -145,7 +174,8 @@ def get_catalog():
             _cache.update(channels=statuses,error='; '.join(errors),expires=time.time()+300)
             raise YoutubeError('Nenhum canal carregado. Confira /health e a chave da API.')
         _cache.update(items=all_items,channels=statuses,updated=datetime.now(timezone.utc).isoformat(),
-                      error='; '.join(errors) if errors else None,expires=time.time()+CACHE_SECONDS)
+                      error='; '.join(errors) if errors else None,
+                      expires=max(time.time()+CACHE_SECONDS, _quota['retry_at']) if _quota['retry_at'] > time.time() else time.time()+CACHE_SECONDS)
         return all_items
 
 # Series catalog is separate from the legacy M3U. Playlist membership is the
@@ -284,7 +314,8 @@ def home(): return jsonify({'service':'MEU IPTV Multi-Canais','routes':['/health
 def health():
     return jsonify({'status':'ok','api_key_configured':bool(os.getenv('YOUTUBE_API_KEY')),
                     'cached_count':len(_cache['items']),'last_update':_cache['updated'],
-                    'last_error':_cache['error'],'channels':_cache['channels']})
+                    'last_error':_cache['error'],'channels':_cache['channels'],
+                    'quota_wait_until_utc':datetime.fromtimestamp(_quota['retry_at'], timezone.utc).isoformat() if _quota['retry_at'] > time.time() else None})
 
 @app.get('/catalog.json')
 def catalog():
