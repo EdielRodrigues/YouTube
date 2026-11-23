@@ -27,6 +27,21 @@ CHANNELS = [
  {'key':'sbtnews','name':'SBT News','group':'TV ao vivo | SBT News','handle':'sbtnews','type':'ao_vivo'},
  {'key':'cnnbrasil','name':'CNN Brasil','group':'TV ao vivo | CNN Brasil','handle':'cnnbrasil','type':'ao_vivo'},
  {'key':'bandjornalismo','name':'Band Jornalismo','group':'TV ao vivo | Band Jornalismo','handle':'bandjornalismo','type':'ao_vivo'},
+ {'key': 'adrenalinapura', 'name': 'Adrenalina Pura TV BR', 'group': 'Filmes | Adrenalina Pura TV BR', 'type': 'filmes', 'id': 'UCWFovw8iyHBezTmaEWEV0RA'},
+ {'key': 'satocompany', 'name': 'Sato Company', 'group': 'Filmes | Sato Company', 'type': 'filmes', 'id': 'UCTOaq4HfNMstuJfZxHszxgw'},
+ {'key': 'netmovieslegendado', 'name': 'NetMovies Legendado', 'group': 'Filmes | NetMovies Legendado', 'type': 'filmes', 'id': 'UC1YWWfoGwh-6jRlf0z33HXA'},
+ {'key': 'pipocafilmes', 'name': 'PipocaFilmes', 'group': 'Filmes | PipocaFilmes', 'type': 'filmes', 'id': 'UCtEtQVAe_pp99aMaCl3IjbQ'},
+ {'key': 'telanacional', 'name': 'Tela Nacional', 'group': 'Filmes | Tela Nacional', 'type': 'filmes', 'id': 'UC_5U0P2u8MAITDbxxGl6yIQ'},
+ {'key': 'videoflix', 'name': 'Video Flix', 'group': 'Filmes | Video Flix', 'type': 'filmes', 'id': 'UCOykIg9lwB_RNLNEwVms5Eg'},
+ {'key': 'cinepaixao', 'name': 'CinePaixão', 'group': 'Filmes | CinePaixão', 'type': 'filmes', 'id': 'UCWaBS_9pC880ADhBIx2dhnQ'},
+ {'key': 'pantallaplateada', 'name': 'PantallaPlateada', 'group': 'Filmes | PantallaPlateada', 'type': 'filmes', 'id': 'UCx-VNXWyHpc32RUlLntUOcg'},
+ {'key': 'cinelandia', 'name': 'Cinelandia', 'group': 'Filmes | Cinelandia', 'type': 'filmes', 'id': 'UCMOa-OvARxCtY1PAH0xrCUg'},
+ {'key': 'sofilmesdublados', 'name': 'Só Filmes Dublados', 'group': 'Filmes | Só Filmes Dublados', 'type': 'filmes', 'id': 'UCxUJvaPx_ljD6DWQtpW57wQ'},
+ {'key': 'cinemaacaototal', 'name': 'Cinema de Ação Total', 'group': 'Filmes | Cinema de Ação Total', 'type': 'filmes', 'id': 'UCsr0TOJJspfI741SoEqrVSg'},
+ {'key': 'filmescompletosdublados', 'name': 'Filmes completos dublados', 'group': 'Filmes | Filmes completos dublados', 'type': 'filmes', 'id': 'UC_b5cGBokvam5OJtncKV-Iw'},
+ {'key': 'terrorbrfilmes', 'name': 'Terror BR Filmes', 'group': 'Filmes | Terror BR Filmes', 'type': 'filmes', 'id': 'UC8j0DBglRAFUIjcNYv5wV8A'},
+ {'key': 'movieschanneloficial', 'name': 'Movies Channel Oficial', 'group': 'Filmes | Movies Channel Oficial', 'type': 'filmes', 'id': 'UCShWkr0wUHiGxQfOcpp0ZKg'},
+ {'key': 'filmescompletosemportugues', 'name': 'Filmes Completos em Português', 'group': 'Filmes | Filmes Completos em Português', 'type': 'filmes', 'id': 'UCvZerT8gdBaKuJD8nYGfcDA'},
 ]
 
 class YoutubeError(Exception): pass
@@ -87,7 +102,24 @@ def fetch_channel(channel, info):
         videos.append({'id':vid,'title':title,'url':f'https://www.youtube.com/watch?v={vid}',
                        'thumbnail':cover,'publishedAt':sn.get('publishedAt',''),
                        'channel':channel['name'],'group':channel['group'],'kind':channel['type']})
+    if channel.get('key') in NEW_FILM_KEYS and videos:
+        allowed = set()
+        # videos.list is low-quota and supplies both duration and embeddability.
+        for start in range(0, len(videos), 50):
+            batch = videos[start:start+50]
+            response = api_get('videos', part='contentDetails,status', id=','.join(v['id'] for v in batch), maxResults=50)
+            for detail in response.get('items', []):
+                status = detail.get('status', {})
+                duration = detail.get('contentDetails', {}).get('duration', '')
+                # ISO-8601 duration with hours/minutes/seconds; reject live/unknown.
+                m = re.fullmatch(r'P(?:([0-9]+)D)?T?(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)S)?', duration)
+                seconds = (int(m.group(1) or 0)*86400 + int(m.group(2) or 0)*3600 + int(m.group(3) or 0)*60 + int(m.group(4) or 0)) if m else 0
+                if status.get('embeddable') is True and status.get('privacyStatus') == 'public' and seconds >= 2700:
+                    allowed.add(detail['id'])
+        videos = [v for v in videos if v['id'] in allowed]
     return videos
+
+NEW_FILM_KEYS = {'cinepaixao', 'sofilmesdublados', 'satocompany', 'cinelandia', 'movieschanneloficial', 'filmescompletosemportugues', 'filmescompletosdublados', 'videoflix', 'terrorbrfilmes', 'adrenalinapura', 'pipocafilmes', 'netmovieslegendado', 'pantallaplateada', 'telanacional', 'cinemaacaototal'}
 
 def get_catalog():
     if _cache['expires'] > time.time(): return _cache['items']
