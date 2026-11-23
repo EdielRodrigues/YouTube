@@ -118,7 +118,7 @@ def get_catalog():
 
 # Series catalog is separate from the legacy M3U. Playlist membership is the
 # source of truth for editions/collections, not a guessed season number.
-SERIES_PLAYLIST_CACHE = {'expires': 0, 'payload': None}
+SERIES_PLAYLIST_CACHE = {'expires': 0, 'payload': None, 'assignments': {}}
 SERIES_PLAYLIST_LOCK = threading.Lock()
 EPISODE_RE = re.compile(r'(?i)(?:\bepis[oó]dio\s*(?:n[º°.]?\s*)?|\bcap[ií]tulo\s*(?:n[º°.]?\s*)?|\bep\.?\s*)(\d{1,4})\b')
 SEASON_RE = re.compile(r'(?i)\btemporada\s*(\d{1,3})\b')
@@ -160,9 +160,33 @@ def playlist_collections(channel_info, available):
         if not token: break
     return collections
 
-def series_catalog(items):
+# Playlists are grouped by production, not by the whole YouTube channel.
+# These names are identifiers for matching playlist titles, not claims that a
+# particular show is present until its playlist is returned by the API.
+KNOWN_SHOWS = (
+    ('Série Madrugador', ('madrugador', 'erkenci kus', 'erkenci kuş', 'pássaro sonhador')),
+    ('A Noiva de Istambul', ('noiva de istambul', 'istanbullu gelin', 'istanbullu gelin')),
+    ('Amor Para Alugar', ('amor para alugar', 'kiralik ask', 'kiralık aşk')),
+    ('Amor na Ilha', ('amor na ilha', 'ada masali', 'ada masalı')),
+)
+
+def normalized(text):
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFKD', text.lower()) if not unicodedata.combining(c))
+
+def production_title(playlist_title):
+    clean = normalized(playlist_title)
+    for show, aliases in KNOWN_SHOWS:
+        if any(normalized(alias) in clean for alias in aliases):
+            return show
+    # Unknown productions retain their original playlist title, with only
+    # generic episode/edition labels stripped when possible.
+    title = re.split(r'(?i)\s*[-|:]\s*(?:epis[oó]dios?|cap[ií]tulos?|temporada|vers[aã]o|dublado|completo)', playlist_title)[0].strip()
+    return title or playlist_title
+
+def build_series_catalog(items):
     series_items = [v for v in items if v.get('kind') in ('series','novelas')]
-    result = []
+    result, assignments = [], {}
     for channel in CHANNELS:
         if channel['type'] not in ('series','novelas'): continue
         videos = [v for v in series_items if v.get('channel') == channel['name']]
@@ -171,18 +195,34 @@ def series_catalog(items):
         info, error = resolve(channel)
         if error: raise YoutubeError(error)
         collections = playlist_collections(info, available)
-        included = {v['id'] for c in collections for v in c['episodes']}
-        extras = [v for v in videos if v['id'] not in included]
-        # A source channel can contain several different shows. Do not assert
-        # that the channel itself is a unique series when that isn't verified.
-        result.append({'id':'youtube-source-'+channel['key'],
-                       'title':channel['name'], 'source':channel['name'],
-                       'poster':videos[0].get('thumbnail'),
-                       'classification':'channel_collections',
-                       'collections':collections, 'unclassified':extras,
-                       'collectionCount':len(collections),
-                       'unclassifiedCount':len(extras)})
-    return result
+        if channel['key'] != 'seriesturcas':
+            included = {v['id'] for c in collections for v in c['episodes']}
+            result.append({'id':'youtube-source-'+channel['key'], 'title':channel['name'],
+                           'source':channel['name'], 'poster':videos[0].get('thumbnail'),
+                           'classification':'channel_collections', 'collections':collections,
+                           'unclassified':[v for v in videos if v['id'] not in included],
+                           'collectionCount':len(collections)})
+            continue
+        productions = {}
+        for collection in collections:
+            title = production_title(collection['title'])
+            entry = productions.setdefault(title, {'title':title, 'source':channel['name'],
+                'classification':'playlist_production', 'collections':[], 'unclassified':[]})
+            entry['collections'].append(collection)
+            for video in collection['episodes']:
+                assignments.setdefault(video['id'], title)
+        for title, entry in productions.items():
+            first = entry['collections'][0]['episodes'][0]
+            entry.update(id='youtube-series-'+re.sub(r'[^a-z0-9]+','-',normalized(title)).strip('-'),
+                         poster=first.get('thumbnail'), collectionCount=len(entry['collections']),
+                         unclassifiedCount=0)
+            result.append(entry)
+        # Videos without any public playlist remain available in the M3U,
+        # but must not be misrepresented as episodes of a particular series.
+    return result, assignments
+
+def series_catalog(items):
+    return build_series_catalog(items)[0]
 
 @app.get('/series.json')
 def series_endpoint():
@@ -193,11 +233,11 @@ def series_endpoint():
         with SERIES_PLAYLIST_LOCK:
             if SERIES_PLAYLIST_CACHE['expires'] > time.time():
                 return jsonify(SERIES_PLAYLIST_CACHE['payload'])
-            result = series_catalog(items)
+            result, assignments = build_series_catalog(items)
             payload = {'updatedAt':_cache['updated'], 'seriesCount':len(result),
                        'note':'Collections follow the channel public playlists; editions and specials are not assumed to be official seasons.',
                        'series':result}
-            SERIES_PLAYLIST_CACHE.update(payload=payload,expires=time.time()+CACHE_SECONDS)
+            SERIES_PLAYLIST_CACHE.update(payload=payload,assignments=assignments,expires=time.time()+CACHE_SECONDS)
             return jsonify(payload)
     except (YoutubeError, KeyError, ValueError) as exc:
         return jsonify({'error':str(exc)}),502
@@ -224,9 +264,20 @@ def catalog():
 def playlist():
     try: videos = get_catalog()
     except YoutubeError as e: return Response(str(e),status=502,mimetype='text/plain')
+    # Reuse cached playlist assignments; refresh when needed so the Android
+    # app sees a separate category/cover for each identified production.
+    assignments = SERIES_PLAYLIST_CACHE.get('assignments', {})
+    if SERIES_PLAYLIST_CACHE['expires'] <= time.time():
+        try:
+            _, assignments = build_series_catalog(videos)
+            SERIES_PLAYLIST_CACHE['assignments'] = assignments
+            SERIES_PLAYLIST_CACHE['expires'] = time.time() + CACHE_SECONDS
+        except (YoutubeError, KeyError, ValueError):
+            assignments = SERIES_PLAYLIST_CACHE.get('assignments', {})
     lines = ['#EXTM3U']
     for v in videos:
-        lines.append(f'#EXTINF:-1 tvg-id="youtube-{escape(v["id"])}" tvg-logo="{escape(v["thumbnail"])}" group-title="{escape(v["group"])}",{escape(v["title"])}')
+        group = ('Séries | ' + assignments[v['id']]) if v['channel'] == 'Séries Turcas Dubladas em Português' and v['id'] in assignments else v['group']
+        lines.append(f'#EXTINF:-1 tvg-id="youtube-{escape(v["id"])}" tvg-logo="{escape(v["thumbnail"])}" group-title="{escape(group)}",{escape(v["title"])}')
         lines.append(v['url'])
     return Response('\n'.join(lines)+'\n',mimetype='audio/x-mpegurl',headers={'Cache-Control':'public, max-age=300','Content-Disposition':'inline; filename="meu-iptv-multicanais.m3u"'})
 
