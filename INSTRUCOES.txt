@@ -1,0 +1,9 @@
+MEU IPTV - NOVO CANAL DE SERIES
+
+Substitua apenas app.py no repositorio GitHub conectado ao Render.
+O novo canal usa o ID confirmado UC93qAkwrguZpZY7sP2Zp_tw.
+Nao precisa alterar YOUTUBE_API_KEY.
+Apos deploy, consulte /playlist.m3u, /health e /series.json.
+As playlists publicas sao consultadas pela rota /series.json; a quantidade depende da API, cache e MAX_VIDEOS.
+O app Android precisa consumir /series.json para mostrar as colecoes nos detalhes.
+A reproducao incorporada depende da permissao de cada video no YouTube.
