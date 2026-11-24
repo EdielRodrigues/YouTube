@@ -32,7 +32,7 @@ def install(app, playlist):
     @app.get('/private/account')
     def account(): return private(lambda: jsonify(status='Active'))
     @app.get('/private/playlist.m3u')
-    def catalog(): return private(playlist)
+    def private_catalog(): return private(playlist)
     @app.post('/admin/iptv/clientes')
     def create():
         try:
