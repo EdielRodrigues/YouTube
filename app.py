@@ -371,6 +371,22 @@ def playlist():
         group = ('Séries | ' + assignments[v['id']]) if v['channel'] == 'Séries Turcas Dubladas em Português' and v['id'] in assignments else v['group']
         lines.append(f'#EXTINF:-1 tvg-id="youtube-{escape(v["id"])}" tvg-logo="{escape(v["thumbnail"])}" group-title="{escape(group)}",{escape(v["title"])}')
         lines.append(v['url'])
+    # Append the local, user-supplied playlist without repeating stream URLs.
+    from pathlib import Path
+    extra = Path(__file__).resolve().with_name('ReelSeries_Organizado.m3u')
+    seen = {v['url'].strip() for v in videos}
+    if extra.is_file():
+        with extra.open(encoding='utf-8-sig') as source:
+            entry = None
+            for raw in source:
+                line = raw.strip()
+                if line.startswith('#EXTINF:'):
+                    entry = line
+                elif line and not line.startswith('#') and entry is not None:
+                    if line not in seen:
+                        lines.extend((entry, line))
+                        seen.add(line)
+                    entry = None
     return Response('\n'.join(lines)+'\n',mimetype='audio/x-mpegurl',headers={'Cache-Control':'public, max-age=300','Content-Disposition':'inline; filename="meu-iptv-multicanais.m3u"'})
 
 if __name__ == '__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','10000')))
