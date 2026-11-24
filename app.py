@@ -389,4 +389,7 @@ def playlist():
                     entry = None
     return Response('\n'.join(lines)+'\n',mimetype='audio/x-mpegurl',headers={'Cache-Control':'public, max-age=300','Content-Disposition':'inline; filename="meu-iptv-multicanais.m3u"'})
 
+from own_auth import install
+install(app, playlist)
+
 if __name__ == '__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','10000')))
