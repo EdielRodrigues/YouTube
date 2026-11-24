@@ -55,6 +55,14 @@ CHANNELS = [
  {'key':'sangueosso','name':'Sangue & Osso','group':'Filmes | Sangue & Osso','type':'filmes','id':'UCQ3sWpbd4AQprk93YmwoiKg'},
  {'key':'makinacultural','name':'MáKina Cultural','group':'Filmes | MáKina Cultural','type':'filmes','id':'UC2H8u7uUPBTRPHTQOcdk38w'},
  {'key':'bigtimefilmes','name':'Bigtime - Filmes Completos','group':'Filmes | Bigtime','type':'filmes','id':'UCKUCcyav9Cwy8uaIEcaRTHQ'},
+ {'key': 'iptm', 'name': 'IPTM – Leonardo Sale', 'group': 'Séries | IPTM – Leonardo Sale', 'type': 'series', 'id': 'UCAKKYnfXJOXivKFv4kPCcjg'},
+ {'key': 'moranguinho', 'name': 'Moranguinho – WildBrain', 'group': 'Séries | Moranguinho', 'type': 'series', 'id': 'UCjgMnjThnmvtWN6SgveQvlA'},
+ {'key': 'pocoyo', 'name': 'Pocoyo Brasil', 'group': 'Séries | Pocoyo', 'type': 'series', 'id': 'UCEnXFTwKRy4zSafAGPkooNA'},
+ {'key': 'europa', 'name': 'Europa Filmes', 'group': 'Filmes | Europa Filmes', 'type': 'filmes', 'id': 'UCxXVNGnoLYuHaudSjm_-lhw'},
+ {'key': 'netmovies_kids', 'name': 'NetMovies Kids', 'group': 'Filmes | Infantil – NetMovies Kids', 'type': 'filmes', 'id': 'UCFxHT3Nz5n_Co48GqcdwdKA'},
+ {'key': 'filmplus', 'name': 'Film Plus', 'group': 'Filmes | Film Plus', 'type': 'filmes', 'id': 'UCXi7MtdQ4JeEQN9CQ-w9syA'},
+ {'key': 'cineanimado', 'name': 'Cine Animado', 'group': 'Filmes | Animação – Cine Animado', 'type': 'filmes', 'id': 'UCDg1hVDqPz2fz0Qs4Tn7qcA'},
+ {'key': 'filmplus_family', 'name': 'Film Plus Family', 'group': 'Filmes | Família – Film Plus Family', 'type': 'filmes', 'id': 'UC7cAIuzcJD6Rqgld4HDyFog'},
 ]
 
 class YoutubeError(Exception): pass
@@ -108,13 +116,16 @@ def fetch_channel(channel, info):
     else:
         uploads = info['contentDetails']['relatedPlaylists']['uploads']
         rows, token = [], None
-        while len(rows) < MAX_PER_CHANNEL:
-            args = {'part':'snippet,contentDetails','playlistId':uploads,'maxResults':min(50,MAX_PER_CHANNEL-len(rows))}
+        limit = None if channel['key'] in EXPANSION_KEYS else MAX_PER_CHANNEL
+        seen_tokens = set()
+        while limit is None or len(rows) < limit:
+            args = {'part':'snippet,contentDetails','playlistId':uploads,'maxResults':50 if limit is None else min(50,limit-len(rows))}
             if token: args['pageToken'] = token
             page = api_get('playlistItems', **args)
             rows.extend(page.get('items',[]))
             token = page.get('nextPageToken')
-            if not token: break
+            if not token or token in seen_tokens: break
+            seen_tokens.add(token)
     videos = []
     for row in rows:
         sn = row.get('snippet',{})
@@ -126,7 +137,7 @@ def fetch_channel(channel, info):
         videos.append({'id':vid,'title':title,'url':f'https://www.youtube.com/watch?v={vid}',
                        'thumbnail':cover,'publishedAt':sn.get('publishedAt',''),
                        'channel':channel['name'],'group':channel['group'],'kind':channel['type']})
-    if channel.get('key') in NEW_FILM_KEYS and videos:
+    if channel.get('key') in (NEW_FILM_KEYS | EXPANSION_KEYS) and videos:
         allowed = set()
         # videos.list is low-quota and supplies both duration and embeddability.
         for start in range(0, len(videos), 50):
@@ -138,12 +149,22 @@ def fetch_channel(channel, info):
                 # ISO-8601 duration with hours/minutes/seconds; reject live/unknown.
                 m = re.fullmatch(r'P(?:([0-9]+)D)?T?(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)S)?', duration)
                 seconds = (int(m.group(1) or 0)*86400 + int(m.group(2) or 0)*3600 + int(m.group(3) or 0)*60 + int(m.group(4) or 0)) if m else 0
-                if status.get('embeddable') is True and status.get('privacyStatus') == 'public' and seconds >= 2700:
+                if status.get('embeddable') is True and status.get('privacyStatus') == 'public' and (channel['type'] != 'filmes' or seconds >= (1200 if channel['key'] in {'netmovies_kids', 'cineanimado', 'filmplus_family'} else 2700)):
                     allowed.add(detail['id'])
         videos = [v for v in videos if v['id'] in allowed]
     return videos
 
 NEW_FILM_KEYS = {'cinepaixao', 'sofilmesdublados', 'satocompany', 'cinelandia', 'movieschanneloficial', 'filmescompletosemportugues', 'filmescompletosdublados', 'videoflix', 'terrorbrfilmes', 'adrenalinapura', 'pipocafilmes', 'netmovieslegendado', 'pantallaplateada', 'telanacional', 'cinemaacaototal'}
+
+EXPANSION_KEYS = {'cineanimado', 'iptm', 'netmovies_kids', 'moranguinho', 'pocoyo', 'filmplus', 'europa', 'filmplus_family'}
+
+def unique_videos(videos, seen):
+    result = []
+    for video in videos:
+        if video['id'] not in seen:
+            seen.add(video['id'])
+            result.append(video)
+    return result
 
 def get_catalog():
     if _cache['expires'] > time.time(): return _cache['items']
@@ -151,23 +172,31 @@ def get_catalog():
         if _cache['expires'] > time.time(): return _cache['items']
         all_items, statuses, errors = [], [], []
         previous = {}
+        seen = set()
+        seen_channels = set()
         for old in _cache['items']: previous.setdefault(old['channel'],[]).append(old)
         for channel in CHANNELS:
             if time.time() < _quota['retry_at']:
                 retained = previous.get(channel['name'], [])
+                retained = unique_videos(retained, seen)
                 all_items.extend(retained)
                 statuses.append({'name':channel['name'],'key':channel['key'],'count':len(retained),'status':'quota_wait','message':_quota['message']})
                 continue
             try:
                 info, issue = resolve(channel)
                 if issue: raise YoutubeError(issue)
-                videos = fetch_channel(channel,info)
+                if info['id'] in seen_channels:
+                    statuses.append({'name':channel['name'],'key':channel['key'],'count':0,'status':'duplicate'})
+                    continue
+                videos = unique_videos(fetch_channel(channel,info), seen)
+                seen_channels.add(info['id'])
                 all_items.extend(videos)
                 statuses.append({'name':channel['name'],'key':channel['key'],'count':len(videos),'status':'ok'})
             except (YoutubeError, KeyError, ValueError) as exc:
                 error = str(exc)
                 errors.append(f'{channel["name"]}: {error}')
                 retained = previous.get(channel['name'],[])
+                retained = unique_videos(retained, seen)
                 all_items.extend(retained)
                 statuses.append({'name':channel['name'],'key':channel['key'],'count':len(retained),'status':'error','message':error})
         if not all_items and not _cache['updated']:
@@ -290,10 +319,10 @@ def series_catalog(items):
 def series_endpoint():
     try:
         items = get_catalog()
-        if SERIES_PLAYLIST_CACHE['expires'] > time.time():
+        if SERIES_PLAYLIST_CACHE['payload'] is not None and SERIES_PLAYLIST_CACHE['expires'] > time.time():
             return jsonify(SERIES_PLAYLIST_CACHE['payload'])
         with SERIES_PLAYLIST_LOCK:
-            if SERIES_PLAYLIST_CACHE['expires'] > time.time():
+            if SERIES_PLAYLIST_CACHE['payload'] is not None and SERIES_PLAYLIST_CACHE['expires'] > time.time():
                 return jsonify(SERIES_PLAYLIST_CACHE['payload'])
             result, assignments = build_series_catalog(items)
             payload = {'updatedAt':_cache['updated'], 'seriesCount':len(result),
