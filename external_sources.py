@@ -32,7 +32,7 @@ def peertube(entry):
     if not https(base): return None
     v=get(base+'/api/v1/videos/'+quote(ident,safe=''))
     lic={1:'https://creativecommons.org/licenses/by/4.0/',2:'https://creativecommons.org/licenses/by-sa/4.0/',7:'https://creativecommons.org/publicdomain/zero/1.0/'}.get((v.get('licence') or {}).get('id'))
-    if not lic or (v.get('privacy') or {}).get('id')!=1 or v.get('isLive'): return None
+    if not lic or v.get('nsfw') or (v.get('privacy') or {}).get('id')!=1 or v.get('isLive'): return None
     urls=[p.get('playlistUrl') for p in v.get('streamingPlaylists',[])]+[f.get('fileUrl') for f in v.get('files',[])]
     url=next((u for u in urls if https(u)),None)
     if not url: return None
@@ -56,11 +56,28 @@ def snapshot():
                 threading.Thread(target=refresh,daemon=True).start()
         return list(CACHE.get('items',[])),dict(CACHE.get('status',{}))
 
+def discover_archive():
+    query = 'mediatype:movies AND (language:por OR language:Portuguese OR language:pt) AND (licenseurl:*creativecommons.org/licenses/by/* OR licenseurl:*creativecommons.org/licenses/by-sa/* OR licenseurl:*creativecommons.org/publicdomain/*)'
+    data = get('https://archive.org/advancedsearch.php', q=query, **{'fl[]':'identifier'}, rows=35, page=1, output='json')
+    return [{'source':'archive','id':r['identifier']} for r in data.get('response',{}).get('docs',[]) if r.get('identifier')]
+
+def discover_peertube():
+    base='https://video.blender.org'
+    data=get(base+'/api/v1/videos', count=25, **{'licenceOneOf[]':[1,2,7], 'nsfw':'false', 'isLive':'false'})
+    return [{'source':'peertube','instance':base,'id':r['uuid']} for r in data.get('data',[]) if r.get('uuid')]
+
 def refresh():
     items=[]; status={k:{'count':0,'errors':0} for k in FETCHERS}
     try:
         approved=json.loads(os.getenv('EXTERNAL_APPROVED_JSON','[]'))
+        for key, discover in [('archive',discover_archive),('peertube',discover_peertube)]:
+            try: approved.extend(discover())
+            except Exception: status[key]['errors']+=1
+        seen_entries=set()
         for e in approved[:300]:
+            identity=(e.get('source'),e.get('instance'),e.get('id'))
+            if identity in seen_entries: continue
+            seen_entries.add(identity)
             k=e.get('source')
             if k not in FETCHERS: continue
             try:
