@@ -350,6 +350,8 @@ def health():
 def catalog():
     try: videos = get_catalog()
     except YoutubeError as e: return jsonify({'error':str(e)}),502
+    extra, _ = external_snapshot()
+    videos = videos + extra
     return jsonify({'channel':'multicanais','updatedAt':_cache['updated'],'count':len(videos),'videos':videos})
 
 @app.get('/playlist.m3u')
@@ -366,6 +368,9 @@ def playlist():
             SERIES_PLAYLIST_CACHE['expires'] = time.time() + CACHE_SECONDS
         except (YoutubeError, KeyError, ValueError):
             assignments = SERIES_PLAYLIST_CACHE.get('assignments', {})
+    extra_videos, _ = external_snapshot()
+    # Dailymotion uses an official embed, not a native M3U stream.
+    videos = videos + [v for v in extra_videos if v['channel'] != 'Dailymotion']
     lines = ['#EXTM3U']
     for v in videos:
         group = ('Séries | ' + assignments[v['id']]) if v['channel'] == 'Séries Turcas Dubladas em Português' and v['id'] in assignments else v['group']
@@ -388,6 +393,9 @@ def playlist():
                         seen.add(line)
                     entry = None
     return Response('\n'.join(lines)+'\n',mimetype='audio/x-mpegurl',headers={'Cache-Control':'public, max-age=300','Content-Disposition':'inline; filename="meu-iptv-multicanais.m3u"'})
+
+from external_sources import install as install_external, snapshot as external_snapshot
+install_external(app)
 
 from own_auth import install
 install(app, playlist)
