@@ -315,7 +315,6 @@ def build_series_catalog(items):
 def series_catalog(items):
     return build_series_catalog(items)[0]
 
-@app.get('/series.json')
 def series_endpoint():
     try:
         items = get_catalog()
@@ -346,7 +345,6 @@ def health():
                     'last_error':_cache['error'],'channels':_cache['channels'],
                     'quota_wait_until_utc':datetime.fromtimestamp(_quota['retry_at'], timezone.utc).isoformat() if _quota['retry_at'] > time.time() else None})
 
-@app.get('/catalog.json')
 def catalog():
     try: videos = get_catalog()
     except YoutubeError as e: return jsonify({'error':str(e)}),502
@@ -354,7 +352,6 @@ def catalog():
     videos = videos + extra
     return jsonify({'channel':'multicanais','updatedAt':_cache['updated'],'count':len(videos),'videos':videos})
 
-@app.get('/playlist.m3u')
 def playlist():
     try: videos = get_catalog()
     except YoutubeError as e: return Response(str(e),status=502,mimetype='text/plain')
@@ -399,5 +396,11 @@ install_external(app)
 
 from own_auth import install
 install(app, playlist)
+
+@app.before_request
+def block_public_catalogs():
+    from flask import request
+    if request.path in ('/playlist.m3u','/catalog.json','/series.json','/external/catalog.json'):
+        return jsonify(error='Use uma conexão autenticada'), 401
 
 if __name__ == '__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','10000')))

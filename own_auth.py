@@ -45,11 +45,11 @@ def install(app, playlist):
     def private_catalog(): return private(playlist)
     @app.get('/private/list/<token>.m3u')
     def token_playlist(token):
-        if not re.fullmatch(r'[A-Za-z0-9_-]{43}', token): return jsonify(error='Acesso negado'),401
-        rows = db().collection('iptvClientesPrivados').where('playlistToken','==',token).limit(1).stream()
-        row = next(iter(rows), None)
-        if row is None or not valid(row.to_dict()): return jsonify(error='Acesso negado'),401
-        response = app.make_response(playlist()); response.headers['Cache-Control'] = 'private, no-store'; return response
+        def handler():
+            row = authorize()
+            if not row or not hmac.compare_digest(row.get('playlistToken',''), token): return jsonify(error='Acesso negado'),401
+            return playlist()
+        return private(handler)
     def admin():
         try:
             db()
@@ -76,3 +76,6 @@ def install(app, playlist):
         try: ref.create(row)
         except AlreadyExists: return jsonify(error='Cliente já cadastrado'),409
         return jsonify(public(row)),201
+
+    from split_catalog import install as install_split
+    install_split(app, playlist, private)
