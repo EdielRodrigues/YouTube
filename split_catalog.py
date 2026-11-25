@@ -1,4 +1,4 @@
-import gzip, hashlib, re, threading, time
+import gzip, hashlib, re, threading, time, os
 from flask import Response, jsonify, request
 
 _lock = threading.Lock()
@@ -7,8 +7,9 @@ _snapshot = {}
 def install(app, playlist, private):
     from pathlib import Path
     def local_playlist():
-        path = Path(__file__).with_name("ReelSeries_Organizado.m3u")
-        return path.read_text(encoding="utf-8-sig") if path.is_file() else "#EXTM3U\n"
+        path = Path(os.getenv("IPTV_PLAYLIST_PATH", str(Path(__file__).with_name("ReelSeries_Organizado.m3u"))))
+        if not path.is_file(): raise FileNotFoundError("Playlist adicional ausente")
+        return path.read_text(encoding="utf-8-sig")
     def publish(text, merge=False):
         global _snapshot
         groups = {k:["#EXTM3U"] for k in ("vod","series","live")}
@@ -27,9 +28,10 @@ def install(app, playlist, private):
         new = {}
         for kind, lines in groups.items():
             raw = ("\n".join(lines)+"\n").encode()
+            if len(lines) == 1: continue
             new[kind] = (hashlib.sha256(raw).hexdigest(),gzip.compress(raw,mtime=0),(len(lines)-1)//2)
         with _lock:
-            _snapshot = new
+            _snapshot.update(new)
     @app.get("/catalog/health")
     def split_health():
         with _lock:
@@ -43,7 +45,10 @@ def install(app, playlist, private):
                 with app.test_request_context():
                     response = app.make_response(playlist())
                     if response.status_code != 200: raise RuntimeError('catalog unavailable')
-                    publish(response.get_data(as_text=True))
+                    combined = response.get_data(as_text=True)
+                    try: combined += "\n" + local_playlist()
+                    except FileNotFoundError: pass
+                    publish(combined)
             except Exception: app.logger.exception('Split catalog refresh failed')
             time.sleep(900)
     @app.get('/private/v')
