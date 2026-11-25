@@ -1,5 +1,0 @@
-Substitua app.py e requirements.txt e adicione own_auth.py no repositório YouTube. Preserve a M3U existente.
-No Render configure FIREBASE_SERVICE_ACCOUNT_JSON (JSON da conta de serviço Firebase, somente variável secreta) e IPTV_ADMIN_UID (UID do administrador existente).
-Nas regras Firestore, negue todo acesso direto de clientes à coleção iptvClientesPrivados, inclusive por regras genéricas permissivas. O SDK administrativo acessa a coleção no servidor.
-POST /admin/iptv/clientes com Authorization: Bearer <Firebase ID token do administrador> e JSON nome, telefone, senha (mínimo 8 caracteres). Cria ou substitui o cadastro. Não há interface administrativa nova neste pacote.
-Rotas /private/account e /private/playlist.m3u usam HTTPS Basic Auth com telefone e senha. As rotas públicas antigas permanecem para compatibilidade; portanto o catálogo não está integralmente protegido contra acesso público. Bloqueio pode ser feito alterando ativo para false no console Firestore. Não há limitação de tentativas nem de conexões simultâneas implementada.
