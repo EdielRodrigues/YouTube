@@ -48,17 +48,17 @@ def install(app, playlist, private):
         if missing: raise RuntimeError('Missing categories: '+','.join(missing))
         state(stage='local_ready', error=None)
     @app.get('/catalog/health')
-    def health():
+    def split_catalog_health():
         with lock:
             return jsonify({**{k:{'count':v[2],'bytes':len(v[1]),'version':v[0]} for k,v in snapshot.items()},'diagnostic':dict(status)})
     @app.get('/private/v')
-    def versions():
+    def split_catalog_versions():
         def handler():
             with lock: data = {k:{'version':v[0],'count':v[2]} for k,v in snapshot.items()}
             return jsonify(data) if data else (jsonify(error='Preparando catálogo'),503)
         return private(handler)
     @app.get('/private/c/<kind>')
-    def download(kind):
+    def split_catalog_download(kind):
         def handler():
             with lock: value = snapshot.get(kind)
             if not value: return jsonify(error='Catálogo indisponível'),503
