@@ -5,28 +5,45 @@ _lock = threading.Lock()
 _snapshot = {}
 
 def install(app, playlist, private):
+    from pathlib import Path
+    def local_playlist():
+        path = Path(__file__).with_name("ReelSeries_Organizado.m3u")
+        return path.read_text(encoding="utf-8-sig") if path.is_file() else "#EXTM3U\n"
+    def publish(text, merge=False):
+        global _snapshot
+        groups = {k:["#EXTM3U"] for k in ("vod","series","live")}
+        seen = set()
+        entry = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("#EXTINF:"): entry = line
+            elif entry and line.startswith(("http://","https://")):
+                match = re.search(r'group-title="([^"]*)"',entry)
+                group = (match.group(1) if match else "").lower()
+                kind = "live" if group.startswith("tv") or "ao vivo" in group else "series" if group.startswith(("séries","series","novelas")) else "vod"
+                if (kind,line) not in seen:
+                    groups[kind].extend((entry,line)); seen.add((kind,line))
+                entry = None
+        new = {}
+        for kind, lines in groups.items():
+            raw = ("\n".join(lines)+"\n").encode()
+            new[kind] = (hashlib.sha256(raw).hexdigest(),gzip.compress(raw,mtime=0),(len(lines)-1)//2)
+        with _lock:
+            _snapshot = new
+    @app.get("/catalog/health")
+    def split_health():
+        with _lock:
+            return jsonify({k:{"count":v[2],"bytes":len(v[1]),"version":v[0]} for k,v in _snapshot.items()})
     def worker():
         global _snapshot
+        try: publish(local_playlist())
+        except Exception: app.logger.exception("Local catalog failed")
         while True:
             try:
                 with app.test_request_context():
                     response = app.make_response(playlist())
                     if response.status_code != 200: raise RuntimeError('catalog unavailable')
-                    groups = {k:['#EXTM3U'] for k in ('vod','series','live')}
-                    entry = None
-                    for line in response.get_data(as_text=True).splitlines():
-                        if line.startswith('#EXTINF:'): entry = line
-                        elif entry and line.startswith(('http://','https://')):
-                            match = re.search(r'group-title="([^"]*)"',entry)
-                            group = (match.group(1) if match else '').lower()
-                            kind = 'live' if group.startswith('tv') or 'ao vivo' in group else 'series' if group.startswith(('séries','series','novelas')) else 'vod'
-                            groups[kind].extend((entry,line)); entry=None
-                    new = {}
-                    for kind, lines in groups.items():
-                        raw = ('\n'.join(lines)+'\n').encode()
-                        version = hashlib.sha256(raw).hexdigest()
-                        new[kind] = (version,gzip.compress(raw,mtime=0),(len(lines)-1)//2)
-                    with _lock: _snapshot = new
+                    publish(response.get_data(as_text=True))
             except Exception: app.logger.exception('Split catalog refresh failed')
             time.sleep(900)
     @app.get('/private/v')
