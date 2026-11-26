@@ -1,5 +1,27 @@
 import gzip, hashlib, re, threading, time, os, io
 from pathlib import Path
+import sqlite3, json, fcntl
+ROOT = Path(os.getenv("IPTV_CACHE_DIR", "/tmp/meu-iptv-cache"))
+ROOT.mkdir(parents=True, exist_ok=True)
+def db():
+    c = sqlite3.connect(str(ROOT / "catalog.sqlite"), timeout=30)
+    c.execute("CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, diagnostic TEXT, vod BLOB, series BLOB, live BLOB, metadata TEXT)")
+    return c
+def read_shared(kind=None):
+    with db() as c:
+        if kind in KINDS:
+            row = c.execute(f"SELECT {kind}, metadata FROM snapshots WHERE id=1").fetchone()
+            if row and row[0] is not None:
+                m=json.loads(row[1])[kind]; return (m[0],row[0],m[1])
+            return None
+        row=c.execute("SELECT diagnostic, metadata FROM snapshots WHERE id=1").fetchone()
+        return (json.loads(row[0]),json.loads(row[1])) if row else ({},{})
+def youtube_health():
+    try: return json.loads((ROOT / "youtube.json").read_text())
+    except (OSError, ValueError): return {}
+def save_youtube_health(value):
+    tmp=ROOT / ("youtube.%s.tmp" % os.getpid())
+    tmp.write_text(json.dumps(value)); os.replace(tmp,ROOT / "youtube.json")
 
 KINDS = ('vod', 'series', 'live')
 
@@ -35,7 +57,9 @@ def install(app, playlist, private):
     status = {'stage':'starting','error':None,'refresh_error':None,'process_id':os.getpid(),'youtube_count':0,'channels_completed':0}
     path = Path(os.getenv('IPTV_PLAYLIST_PATH') or str(Path(__file__).resolve().with_name('ReelSeries_Organizado.m3u')))
     def state(**kw):
-        with lock: status.update(kw)
+        with lock:
+            status.update(kw)
+            with db() as c: c.execute("UPDATE snapshots SET diagnostic=? WHERE id=1",(json.dumps(status),))
         app.logger.warning('Catalog status: %s', kw)
     def publish(lines, **progress):
         prepared = dict(build(lines))
@@ -43,6 +67,9 @@ def install(app, playlist, private):
             snapshot.update(prepared)
             status.update(progress)
             status['published_at'] = time.time()
+            meta={k:[v[0],v[2],len(v[1])] for k,v in snapshot.items()}
+            with db() as c:
+                c.execute('INSERT OR REPLACE INTO snapshots VALUES (1,?,?,?,?,?)',(json.dumps(status),*[snapshot[k][1] if k in snapshot else None for k in KINDS],json.dumps(meta)))
         for kind, value in prepared.items():
             app.logger.warning('Catalog %s ready: %d', kind, value[2])
     def local():
@@ -53,18 +80,19 @@ def install(app, playlist, private):
         state(stage='local_ready', error=None)
     @app.get('/catalog/health')
     def split_catalog_health():
-        with lock:
-            return jsonify({**{k:{'count':v[2],'bytes':len(v[1]),'version':v[0]} for k,v in snapshot.items()},'diagnostic':dict(status)})
+        diagnostic, meta = read_shared()
+        return jsonify({**{k:{'count':v[1],'bytes':v[2],'version':v[0]} for k,v in meta.items()},'diagnostic':diagnostic})
     @app.get('/private/v')
     def split_catalog_versions():
         def handler():
-            with lock: data = {k:{'version':v[0],'count':v[2]} for k,v in snapshot.items()}
+            _, meta = read_shared()
+            data = {k:{'version':v[0],'count':v[1]} for k,v in meta.items()}
             return jsonify(data) if data else (jsonify(error='Preparando catálogo'),503)
         return private(handler)
     @app.get('/private/c/<kind>')
     def split_catalog_download(kind):
         def handler():
-            with lock: value = snapshot.get(kind)
+            value = read_shared(kind)
             if not value: return jsonify(error='Catálogo indisponível'),503
             version,payload,count = value
             return Response(payload,mimetype='application/gzip',headers={'X-Catalog-Version':version,'X-Catalog-Count':str(count)})
@@ -72,7 +100,7 @@ def install(app, playlist, private):
     def worker():
         while True:
             try:
-                if not snapshot: local()
+                if not read_shared()[1]: local()
             except Exception as exc:
                 state(stage='local_error',error=type(exc).__name__)
                 app.logger.exception('Local catalog failed')
@@ -96,9 +124,13 @@ def install(app, playlist, private):
                 state(stage='refresh_error',refresh_error=type(exc).__name__)
                 app.logger.exception('External catalog failed')
             time.sleep(900)
-    # Prepare local catalog synchronously, before accepting requests.
-    try: local()
-    except Exception as exc:
-        state(stage='local_error',error=type(exc).__name__)
-        app.logger.exception('Local catalog failed')
-    threading.Thread(target=worker,daemon=True).start()
+    def leader():
+        with (ROOT / 'refresh.lock').open('a') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
+            if not read_shared()[1]:
+                try: local()
+                except Exception as exc:
+                    state(stage='local_error',error=type(exc).__name__)
+                    app.logger.exception('Local catalog failed')
+            worker()
+    threading.Thread(target=leader,daemon=True).start()

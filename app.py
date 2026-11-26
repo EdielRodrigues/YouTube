@@ -207,6 +207,8 @@ def get_catalog(on_progress=None):
                 current = list(all_items) + pending
                 _cache.update(items=current, channels=list(statuses), error='; '.join(errors) or None)
                 if on_progress:
+                    from split_catalog import save_youtube_health
+                    save_youtube_health(dict(status="ok",api_key_configured=bool(os.getenv("YOUTUBE_API_KEY")),cached_count=len(current),channels=list(statuses),active_channel=_cache.get("active_channel"),last_error=_cache["error"],last_update=datetime.now(timezone.utc).isoformat()))
                     on_progress(current, list(statuses))
         _cache['active_channel'] = None
         if not all_items and not _cache['updated']:
@@ -360,6 +362,9 @@ def catalog_no_cache(response):
 
 @app.get('/health')
 def health():
+    from split_catalog import youtube_health
+    shared = youtube_health()
+    if shared: return jsonify({**shared, "process_id":os.getpid()})
     return jsonify({'status':'ok','api_key_configured':bool(os.getenv('YOUTUBE_API_KEY')),
                     'process_id':os.getpid(),'cached_count':len(_cache['items']),'active_channel':_cache.get('active_channel'),'last_update':_cache['updated'],
                     'last_error':_cache['error'],'channels':_cache['channels'],
@@ -422,6 +427,8 @@ def progressive_catalog(callback):
         callback(lines, statuses)
     videos = get_catalog(report)
     report(videos, _cache['channels'])
+    from split_catalog import save_youtube_health
+    save_youtube_health(dict(status="ok",api_key_configured=bool(os.getenv("YOUTUBE_API_KEY")),cached_count=len(videos),channels=_cache["channels"],active_channel=None,last_error=_cache["error"],last_update=_cache["updated"]))
 
 playlist.progressive = progressive_catalog
 
