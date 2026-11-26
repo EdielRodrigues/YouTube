@@ -53,7 +53,7 @@ def build(lines):
                     counts[kind] += 1
             entry = None
     for kind, buf in groups.items():
-        if counts[kind]:
+        if True:
             raw = buf.getvalue()
             yield kind, (hashlib.sha256(raw).hexdigest(), gzip.compress(raw, compresslevel=1, mtime=0), counts[kind])
 
@@ -79,7 +79,9 @@ def install(app, playlist, private):
             app.logger.warning('Catalog %s ready: %d', kind, value[2])
     def local():
         state(stage='reading_local', file_exists=path.is_file(), file_bytes=path.stat().st_size if path.is_file() else 0)
-        with path.open(encoding='utf-8-sig') as source: publish(source)
+        if path.is_file():
+            with path.open(encoding='utf-8-sig') as source: publish(source)
+        else: publish([])
         with lock: missing = [k for k in KINDS if k not in snapshot]
         if missing: raise RuntimeError('Missing categories: '+','.join(missing))
         state(stage='local_ready', error=None)
@@ -113,7 +115,8 @@ def install(app, playlist, private):
                 state(stage='refreshing_external')
                 def progress(lines, channels):
                     from itertools import chain
-                    with path.open(encoding='utf-8-sig') as source:
+                    from contextlib import nullcontext
+                    with (path.open(encoding='utf-8-sig') if path.is_file() else nullcontext([])) as source:
                         publish(chain(source, lines), stage='refreshing_external', channels_completed=len(channels), youtube_count=sum(c.get('count',0) for c in channels))
                 with app.test_request_context():
                     progressive = getattr(playlist, 'progressive', None)
@@ -122,7 +125,8 @@ def install(app, playlist, private):
                     response = app.make_response(playlist())
                     if response.status_code != 200: raise RuntimeError('External catalog unavailable')
                     from itertools import chain
-                    with path.open(encoding='utf-8-sig') as source:
+                    from contextlib import nullcontext
+                    with (path.open(encoding='utf-8-sig') if path.is_file() else nullcontext([])) as source:
                         publish(chain(source, io.StringIO(response.get_data(as_text=True))))
                 state(stage='ready',refresh_error=None)
             except Exception as exc:

@@ -88,15 +88,66 @@ def discover_global_peertube():
 
 FETCHERS['commons']=commons
 
+def discover_loc():
+    data=get('https://www.loc.gov/film-and-videos/', fo='json', q='motion picture', c=40)
+    return [{'source':'loc','id':str(v.get('id','')), 'record':v} for v in data.get('results',[]) if v.get('id')]
+
+def loc(entry):
+    v=entry['record']; rights=str(v.get('rights', ''))
+    # Only explicit open licence; collection-level access is not permission.
+    if not LICENSE.fullmatch(rights): return None
+    urls=v.get('video',[])
+    if isinstance(urls,str): urls=[urls]
+    url=next((u for u in urls if https(u) and u.lower().endswith('.mp4')),None)
+    if not url: return None
+    return item('Library of Congress',entry['id'],v.get('title',''),url,'','',rights)
+
+def discover_europeana():
+    key=os.getenv('EUROPEANA_API_KEY')
+    if not key: return []
+    data=get('https://api.europeana.eu/record/v2/search.json',wskey=key,query='film',qf='TYPE:VIDEO',rows=50,profile='rich')
+    return [{'source':'europeana','id':v['id'],'record':v} for v in data.get('items',[]) if v.get('id')]
+
+def europeana(entry):
+    v=entry['record']; rights=v.get('rights',[]); rights=[rights] if isinstance(rights,str) else rights
+    lic=next((x for x in rights if isinstance(x,str) and LICENSE.fullmatch(x)),None)
+    urls=v.get('edmIsShownBy',[]); urls=[urls] if isinstance(urls,str) else urls
+    url=next((u for u in urls if https(u) and u.split('?')[0].lower().endswith(('.mp4','.webm','.m3u8'))),None)
+    if not lic or not url: return None
+    title=v.get('title',['']); title=title[0] if isinstance(title,list) else title
+    return item('Europeana',entry['id'],title,url,'','',lic)
+
+def discover_archive_watch():
+    # Use the underlying Archive metadata to validate rights, not an unverified third-party playlist.
+    data=get('https://archive.org/advancedsearch.php',q='mediatype:movies AND (collection:feature_films OR collection:classic_tv) AND licenseurl:*creativecommons.org/*', **{'fl[]':'identifier'},rows=40,output='json')
+    return [{'source':'archive_watch','id':v['identifier']} for v in data.get('response',{}).get('docs',[]) if v.get('identifier')]
+
+def archive_watch(entry):
+    v=archive(entry)
+    if v: v['channel']='Archive Watch (Archive)'; v['group']='Filmes | Archive Watch (Archive)'
+    return v
+
+def discover_open_images():
+    # Open Images material exposed through Commons; licence validated per file.
+    data=get('https://commons.wikimedia.org/w/api.php',action='query',format='json',generator='search',gsrsearch='filetype:video incategory:"Videos from Open Images"',gsrnamespace=6,gsrlimit=40,prop='imageinfo',iiprop='url|mime|extmetadata',iiurlwidth=320)
+    return [{'source':'open_images','id':str(v['pageid']),'page':v} for v in data.get('query',{}).get('pages',{}).values()]
+
+def open_images(entry):
+    v=commons(entry)
+    if v: v['channel']='Open Images'; v['group']='Filmes | Open Images'
+    return v
+
+FETCHERS.update(loc=loc,europeana=europeana,archive_watch=archive_watch,open_images=open_images)
+
 def refresh():
     items=[]; status={k:{'count':0,'errors':0} for k in FETCHERS}
     try:
         approved=json.loads(os.getenv('EXTERNAL_APPROVED_JSON','[]'))
-        for key, discover in [('archive',discover_archive),('peertube',discover_peertube),('peertube',discover_global_peertube),('commons',discover_commons)]:
+        for key, discover in [('archive',discover_archive),('peertube',discover_peertube),('peertube',discover_global_peertube),('commons',discover_commons),('loc',discover_loc),('europeana',discover_europeana),('archive_watch',discover_archive_watch),('open_images',discover_open_images)]:
             try: approved.extend(discover())
             except Exception: status[key]['errors']+=1
         seen_entries=set()
-        for e in approved[:300]:
+        for e in approved[:600]:
             identity=(e.get('source'),e.get('instance'),e.get('id'))
             if identity in seen_entries: continue
             seen_entries.add(identity)
@@ -111,7 +162,7 @@ def refresh():
             old=CACHE.get('items',[])
             for k in FETCHERS:
                 if status[k]['errors'] and not status[k]['count']:
-                    name={'archive':'Internet Archive','peertube':'PeerTube','dailymotion':'Dailymotion','commons':'Wikimedia Commons'}[k]
+                    name={'archive':'Internet Archive','peertube':'PeerTube','dailymotion':'Dailymotion','commons':'Wikimedia Commons','loc':'Library of Congress','europeana':'Europeana','archive_watch':'Archive Watch (Archive)','open_images':'Open Images'}[k]
                     retained=[x for x in old if x['channel']==name]; items.extend(retained); status[k]['count']=len(retained)
             CACHE.update(items=items,status=status)
     except Exception:
