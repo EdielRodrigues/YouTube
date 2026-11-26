@@ -19,7 +19,7 @@ def install(app, playlist):
         expiry = row.get("expiracao")
         return row.get("ativo") is True and (not expiry or expiry > datetime.now(timezone.utc))
     def public(row):
-        return {"nome": row.get("nome", ""), "telefone": row.get("telefone", ""), "maxConexoes": row.get("maxConexoes", 1), "criadoEm": row["criadoEm"].isoformat() if row.get("criadoEm") else "", "expiracao": row["expiracao"].isoformat() if row.get("expiracao") else "", "playlist": request.url_root.rstrip("/") + "/private/list/" + row["playlistToken"] + ".m3u" if row.get("playlistToken") else ""}
+        return {"ativo": row.get("ativo", False), "assinatura": row.get("assinatura", "MEU IPTV PRO"), "nome": row.get("nome", ""), "telefone": row.get("telefone", ""), "maxConexoes": row.get("maxConexoes", 1), "criadoEm": row["criadoEm"].isoformat() if row.get("criadoEm") else "", "expiracao": row["expiracao"].isoformat() if row.get("expiracao") else "", "playlist": request.url_root.rstrip("/") + "/private/list/" + row["playlistToken"] + ".m3u" if row.get("playlistToken") else ""}
     def authorize():
         a = request.authorization
         if not a or a.type != 'basic': return False
@@ -76,6 +76,24 @@ def install(app, playlist):
         try: ref.create(row)
         except AlreadyExists: return jsonify(error='Cliente já cadastrado'),409
         return jsonify(public(row)),201
+
+    @app.put('/admin/iptv/clientes/<telephone>')
+    def edit_iptv_client(telephone):
+        if not admin(): return jsonify(error='Acesso negado'),403
+        n = phone(telephone)
+        data = request.get_json(silent=True) or {}
+        name = data.get('nome'); label = data.get('assinatura'); maximum = data.get('maxConexoes'); active = data.get('ativo'); expiry = data.get('expiracao')
+        if len(n) not in (10,11) or not isinstance(name,str) or not 1 <= len(name.strip()) <= 200 or not isinstance(label,str) or len(label)>200 or type(maximum) is not int or not 1 <= maximum <= 100 or type(active) is not bool or not isinstance(expiry,str): return jsonify(error='Dados inválidos'),400
+        try:
+            end = datetime.fromisoformat(expiry.replace('Z','+00:00')) if expiry else None
+            if end and end.tzinfo is None: raise ValueError()
+        except ValueError: return jsonify(error='Vencimento inválido'),400
+        ref = db().collection('iptvClientesPrivados').document(n)
+        if not ref.get().exists: return jsonify(error='Cliente não encontrado'),404
+        changes = dict(nome=name.strip(), assinatura=label.strip() or 'MEU IPTV PRO', maxConexoes=maximum, ativo=active)
+        if end is not None: changes['expiracao'] = end.astimezone(timezone.utc)
+        ref.update(changes)
+        return jsonify(public(ref.get().to_dict()))
 
     from split_catalog import install as install_split
     install_split(app, playlist, private)
