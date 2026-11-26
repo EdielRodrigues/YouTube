@@ -104,34 +104,76 @@ def install(app, playlist, private):
             version,payload,count = value
             return Response(payload,mimetype='application/gzip',headers={'X-Catalog-Version':version,'X-Catalog-Count':str(count)})
         return private(handler)
-    def worker():
+    # Independent publisher; retain previously published entries on source failure.
+    merge_lock = threading.Lock()
+    youtube_lines = []
+    external_lines = []
+    def entries(lines):
+        pending = None
+        for raw in lines:
+            line = raw.strip()
+            if line.startswith('#EXTINF:'): pending = line
+            elif pending and line.startswith(('https://','http://')):
+                yield pending, line
+                pending = None
+    def merge_publish(**progress):
+        with merge_lock:
+            combined = {}
+            if path.is_file():
+                with path.open(encoding='utf-8-sig') as source:
+                    combined.update((url, tag) for tag,url in entries(source))
+            for lines in (youtube_lines, external_lines):
+                combined.update((url, tag) for tag,url in entries(lines))
+            publish((line for url,tag in combined.items() for line in (tag,url)), **progress)
+    def external_worker():
+        from external_sources import snapshot as external_snapshot
+        from html import escape
         while True:
             try:
-                if not read_shared()[1]: local()
+                items, sources = external_snapshot()
+                lines = []
+                for v in items:
+                    if v.get('channel') == 'Dailymotion' or not str(v.get('url','')).startswith('https://'): continue
+                    def clean(key, default=''):
+                        return escape(str(v.get(key) or default).replace('\n',' ').replace('\r',' '), quote=True)
+                    lines.extend((f'#EXTINF:-1 tvg-id="{clean("id")}" tvg-logo="{clean("thumbnail")}" group-title="{clean("group","Filmes")}",{clean("title")}',v['url']))
+                if lines:
+                    with merge_lock: external_lines[:] = lines
+                    merge_publish(external_count=len(lines)//2, external_error=None)
             except Exception as exc:
-                state(stage='local_error',error=type(exc).__name__)
-                app.logger.exception('Local catalog failed')
+                state(external_error=type(exc).__name__)
+                app.logger.exception('Independent external refresh failed')
+            time.sleep(15)
+    def worker():
+        # Restore previously published remote entries (local file is handled separately).
+        if not path.is_file():
+            for kind in KINDS:
+                value = snapshot.get(kind)
+                if value: youtube_lines.extend(gzip.decompress(value[1]).decode('utf-8').splitlines())
+        threading.Thread(target=external_worker, daemon=True).start()
+        while True:
             try:
                 state(stage='refreshing_external')
                 def progress(lines, channels):
-                    from itertools import chain
-                    from contextlib import nullcontext
-                    with (path.open(encoding='utf-8-sig') if path.is_file() else nullcontext([])) as source:
-                        publish(chain(source, lines), stage='refreshing_external', channels_completed=len(channels), youtube_count=sum(c.get('count',0) for c in channels))
+                    count = sum(c.get('count',0) for c in channels)
+                    if count:
+                        with merge_lock:
+                            old = {url:tag for tag,url in entries(youtube_lines)}
+                            old.update((url,tag) for tag,url in entries(lines))
+                            youtube_lines[:] = [line for url,tag in old.items() for line in (tag,url)]
+                    merge_publish(stage='refreshing_external', channels_completed=len(channels), youtube_count=count)
                 with app.test_request_context():
                     progressive = getattr(playlist, 'progressive', None)
-                    if progressive:
-                        progressive(progress)
-                    response = app.make_response(playlist())
-                    if response.status_code != 200: raise RuntimeError('External catalog unavailable')
-                    from itertools import chain
-                    from contextlib import nullcontext
-                    with (path.open(encoding='utf-8-sig') if path.is_file() else nullcontext([])) as source:
-                        publish(chain(source, io.StringIO(response.get_data(as_text=True))))
+                    if progressive: progressive(progress)
+                    else:
+                        response = app.make_response(playlist())
+                        if response.status_code != 200: raise RuntimeError('YouTube unavailable')
+                        with merge_lock: youtube_lines[:] = response.get_data(as_text=True).splitlines()
+                        merge_publish()
                 state(stage='ready',refresh_error=None)
             except Exception as exc:
                 state(stage='refresh_error',refresh_error=type(exc).__name__)
-                app.logger.exception('External catalog failed')
+                app.logger.exception('YouTube refresh failed; external publisher remains active')
             time.sleep(900)
     def leader():
         with (ROOT / 'refresh.lock').open('a') as lease:
