@@ -1,21 +1,28 @@
 import gzip, hashlib, re, threading, time, os, io
 from pathlib import Path
-import sqlite3, json, fcntl
+import json, fcntl
 ROOT = Path(os.getenv("IPTV_CACHE_DIR", "/tmp/meu-iptv-cache"))
 ROOT.mkdir(parents=True, exist_ok=True)
-def db():
-    c = sqlite3.connect(str(ROOT / "catalog.sqlite"), timeout=30)
-    c.execute("CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, diagnostic TEXT, vod BLOB, series BLOB, live BLOB, metadata TEXT)")
-    return c
+import zipfile
+SNAP = ROOT / 'catalog.snapshot.zip'
 def read_shared(kind=None):
-    with db() as c:
-        if kind in KINDS:
-            row = c.execute(f"SELECT {kind}, metadata FROM snapshots WHERE id=1").fetchone()
-            if row and row[0] is not None:
-                m=json.loads(row[1])[kind]; return (m[0],row[0],m[1])
-            return None
-        row=c.execute("SELECT diagnostic, metadata FROM snapshots WHERE id=1").fetchone()
-        return (json.loads(row[0]),json.loads(row[1])) if row else ({},{})
+    try:
+        with zipfile.ZipFile(SNAP) as z:
+            diagnostic, meta = json.loads(z.read('metadata.json'))
+            if kind in KINDS:
+                if kind not in meta: return None
+                m = meta[kind]
+                return (m[0], z.read(kind), m[1])
+            return diagnostic, meta
+    except FileNotFoundError:
+        return None if kind in KINDS else ({}, {})
+def write_shared(status, snapshot):
+    meta = {k:[v[0],v[2],len(v[1])] for k,v in snapshot.items()}
+    tmp = ROOT / ('catalog.%s.tmp' % os.getpid())
+    with zipfile.ZipFile(tmp, 'w', compression=zipfile.ZIP_STORED) as z:
+        z.writestr('metadata.json', json.dumps([status, meta]))
+        for k,v in snapshot.items(): z.writestr(k,v[1])
+    os.replace(tmp, SNAP)
 def youtube_health():
     try: return json.loads((ROOT / "youtube.json").read_text())
     except (OSError, ValueError): return {}
@@ -59,7 +66,7 @@ def install(app, playlist, private):
     def state(**kw):
         with lock:
             status.update(kw)
-            with db() as c: c.execute("UPDATE snapshots SET diagnostic=? WHERE id=1",(json.dumps(status),))
+            if snapshot: write_shared(status, snapshot)
         app.logger.warning('Catalog status: %s', kw)
     def publish(lines, **progress):
         prepared = dict(build(lines))
@@ -67,9 +74,7 @@ def install(app, playlist, private):
             snapshot.update(prepared)
             status.update(progress)
             status['published_at'] = time.time()
-            meta={k:[v[0],v[2],len(v[1])] for k,v in snapshot.items()}
-            with db() as c:
-                c.execute('INSERT OR REPLACE INTO snapshots VALUES (1,?,?,?,?,?)',(json.dumps(status),*[snapshot[k][1] if k in snapshot else None for k in KINDS],json.dumps(meta)))
+            write_shared(status, snapshot)
         for kind, value in prepared.items():
             app.logger.warning('Catalog %s ready: %d', kind, value[2])
     def local():
@@ -127,7 +132,12 @@ def install(app, playlist, private):
     def leader():
         with (ROOT / 'refresh.lock').open('a') as lease:
             fcntl.flock(lease, fcntl.LOCK_EX)
-            if not read_shared()[1]:
+            diagnostic, meta = read_shared()
+            for k in meta:
+                value = read_shared(k)
+                if value: snapshot[k] = value
+            if diagnostic: status.update(diagnostic)
+            if not snapshot:
                 try: local()
                 except Exception as exc:
                     state(stage='local_error',error=type(exc).__name__)
