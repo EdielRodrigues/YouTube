@@ -74,7 +74,15 @@ def install(app, playlist, private):
                 app.logger.exception('Local catalog failed')
             try:
                 state(stage='refreshing_external')
+                def progress(lines, channels):
+                    from itertools import chain
+                    with path.open(encoding='utf-8-sig') as source:
+                        publish(chain(source, lines))
+                    state(stage='refreshing_external', channels_completed=len(channels), youtube_count=sum(c.get('count',0) for c in channels))
                 with app.test_request_context():
+                    progressive = getattr(playlist, 'progressive', None)
+                    if progressive:
+                        progressive(progress)
                     response = app.make_response(playlist())
                     if response.status_code != 200: raise RuntimeError('External catalog unavailable')
                     from itertools import chain

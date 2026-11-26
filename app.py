@@ -166,7 +166,7 @@ def unique_videos(videos, seen):
             result.append(video)
     return result
 
-def get_catalog():
+def get_catalog(on_progress=None):
     if _cache['expires'] > time.time(): return _cache['items']
     with _lock:
         if _cache['expires'] > time.time(): return _cache['items']
@@ -176,29 +176,39 @@ def get_catalog():
         seen_channels = set()
         for old in _cache['items']: previous.setdefault(old['channel'],[]).append(old)
         for channel in CHANNELS:
-            if time.time() < _quota['retry_at']:
-                retained = previous.get(channel['name'], [])
-                retained = unique_videos(retained, seen)
-                all_items.extend(retained)
-                statuses.append({'name':channel['name'],'key':channel['key'],'count':len(retained),'status':'quota_wait','message':_quota['message']})
-                continue
+            _cache['active_channel'] = channel['name']
             try:
-                info, issue = resolve(channel)
-                if issue: raise YoutubeError(issue)
-                if info['id'] in seen_channels:
-                    statuses.append({'name':channel['name'],'key':channel['key'],'count':0,'status':'duplicate'})
+                if time.time() < _quota['retry_at']:
+                    retained = previous.get(channel['name'], [])
+                    retained = unique_videos(retained, seen)
+                    all_items.extend(retained)
+                    statuses.append({'name':channel['name'],'key':channel['key'],'count':len(retained),'status':'quota_wait','message':_quota['message']})
                     continue
-                videos = unique_videos(fetch_channel(channel,info), seen)
-                seen_channels.add(info['id'])
-                all_items.extend(videos)
-                statuses.append({'name':channel['name'],'key':channel['key'],'count':len(videos),'status':'ok'})
-            except (YoutubeError, KeyError, ValueError) as exc:
-                error = str(exc)
-                errors.append(f'{channel["name"]}: {error}')
-                retained = previous.get(channel['name'],[])
-                retained = unique_videos(retained, seen)
-                all_items.extend(retained)
-                statuses.append({'name':channel['name'],'key':channel['key'],'count':len(retained),'status':'error','message':error})
+                try:
+                    info, issue = resolve(channel)
+                    if issue: raise YoutubeError(issue)
+                    if info['id'] in seen_channels:
+                        statuses.append({'name':channel['name'],'key':channel['key'],'count':0,'status':'duplicate'})
+                        continue
+                    videos = unique_videos(fetch_channel(channel,info), seen)
+                    seen_channels.add(info['id'])
+                    all_items.extend(videos)
+                    statuses.append({'name':channel['name'],'key':channel['key'],'count':len(videos),'status':'ok'})
+                except (YoutubeError, KeyError, ValueError) as exc:
+                    error = str(exc)
+                    errors.append(f'{channel["name"]}: {error}')
+                    retained = previous.get(channel['name'],[])
+                    retained = unique_videos(retained, seen)
+                    all_items.extend(retained)
+                    statuses.append({'name':channel['name'],'key':channel['key'],'count':len(retained),'status':'error','message':error})
+            finally:
+                completed = {x['name'] for x in statuses}
+                pending = [v for name, items in previous.items() if name not in completed for v in items]
+                current = list(all_items) + pending
+                _cache.update(items=current, channels=list(statuses), error='; '.join(errors) or None)
+                if on_progress:
+                    on_progress(current, list(statuses))
+        _cache['active_channel'] = None
         if not all_items and not _cache['updated']:
             _cache.update(channels=statuses,error='; '.join(errors),expires=time.time()+300)
             raise YoutubeError('Nenhum canal carregado. Confira /health e a chave da API.')
@@ -341,7 +351,7 @@ def home(): return jsonify({'service':'MEU IPTV Multi-Canais','routes':['/health
 @app.get('/health')
 def health():
     return jsonify({'status':'ok','api_key_configured':bool(os.getenv('YOUTUBE_API_KEY')),
-                    'cached_count':len(_cache['items']),'last_update':_cache['updated'],
+                    'cached_count':len(_cache['items']),'active_channel':_cache.get('active_channel'),'last_update':_cache['updated'],
                     'last_error':_cache['error'],'channels':_cache['channels'],
                     'quota_wait_until_utc':datetime.fromtimestamp(_quota['retry_at'], timezone.utc).isoformat() if _quota['retry_at'] > time.time() else None})
 
@@ -390,6 +400,20 @@ def playlist():
                         seen.add(line)
                     entry = None
     return Response('\n'.join(lines)+'\n',mimetype='audio/x-mpegurl',headers={'Cache-Control':'public, max-age=300','Content-Disposition':'inline; filename="meu-iptv-multicanais.m3u"'})
+
+def progressive_catalog(callback):
+    def report(videos, statuses):
+        assignments = SERIES_PLAYLIST_CACHE.get('assignments', {})
+        extra, _ = external_snapshot()
+        lines = ['#EXTM3U']
+        for v in list(videos) + [v for v in extra if v['channel'] != 'Dailymotion']:
+            group = ('Séries | ' + assignments[v['id']]) if v['channel'] == 'Séries Turcas Dubladas em Português' and v['id'] in assignments else v['group']
+            lines.extend((f'#EXTINF:-1 tvg-id="youtube-{escape(v["id"])}" tvg-logo="{escape(v["thumbnail"])}" group-title="{escape(group)}",{escape(v["title"])}', v['url']))
+        callback(lines, statuses)
+    videos = get_catalog(report)
+    report(videos, _cache['channels'])
+
+playlist.progressive = progressive_catalog
 
 from external_sources import install as install_external, snapshot as external_snapshot
 install_external(app)
