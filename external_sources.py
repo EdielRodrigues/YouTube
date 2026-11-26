@@ -58,7 +58,7 @@ def snapshot():
 
 def discover_archive():
     query = 'mediatype:movies AND (language:por OR language:Portuguese OR language:pt) AND (licenseurl:*creativecommons.org/licenses/by/* OR licenseurl:*creativecommons.org/licenses/by-sa/* OR licenseurl:*creativecommons.org/publicdomain/*)'
-    data = get('https://archive.org/advancedsearch.php', q=query, **{'fl[]':'identifier'}, rows=35, page=1, output='json')
+    data = get('https://archive.org/advancedsearch.php', q=query, **{'fl[]':'identifier'}, rows=80, page=1, output='json')
     return [{'source':'archive','id':r['identifier']} for r in data.get('response',{}).get('docs',[]) if r.get('identifier')]
 
 def discover_peertube():
@@ -66,11 +66,33 @@ def discover_peertube():
     data=get(base+'/api/v1/videos', count=25, **{'licenceOneOf[]':[1,2,7], 'nsfw':'false', 'isLive':'false'})
     return [{'source':'peertube','instance':base,'id':r['uuid']} for r in data.get('data',[]) if r.get('uuid')]
 
+def discover_commons():
+    data = get('https://commons.wikimedia.org/w/api.php', action='query', format='json', generator='search', gsrsearch='filetype:video (film OR animation OR documentary)', gsrnamespace=6, gsrlimit=50, prop='imageinfo', iiprop='url|mime|extmetadata', iiurlwidth=320, iiextmetadatafilter='LicenseUrl|Artist|Credit|Restrictions')
+    return [{'source':'commons','id':str(v['pageid']),'page':v} for v in data.get('query',{}).get('pages',{}).values()]
+
+def commons(entry):
+    page=entry['page']; info=(page.get('imageinfo') or [{}])[0]; meta=info.get('extmetadata',{})
+    def field(k): return str(meta.get(k,{}).get('value',''))
+    lic=field('LicenseUrl'); url=info.get('url','')
+    if not LICENSE.fullmatch(lic) or not https(url) or not info.get('mime','').startswith('video/') or field('Restrictions'): return None
+    return item('Wikimedia Commons',entry['id'],page['title'].removeprefix('File:').rsplit('.',1)[0],url,info.get('thumburl',''),re.sub('<[^>]+>','',field('Artist')),lic)
+
+def discover_global_peertube():
+    data=get('https://sepiasearch.org/api/v1/search/videos', search='filme', count=30, **{'licenceOneOf[]':[1,2,7], 'nsfw':'false'})
+    from urllib.parse import urlsplit
+    out=[]
+    for v in data.get('data',[]):
+        u=urlsplit(v.get('url',''))
+        if u.scheme=='https' and u.hostname and v.get('uuid'): out.append({'source':'peertube','instance':'https://'+u.hostname,'id':v['uuid']})
+    return out
+
+FETCHERS['commons']=commons
+
 def refresh():
     items=[]; status={k:{'count':0,'errors':0} for k in FETCHERS}
     try:
         approved=json.loads(os.getenv('EXTERNAL_APPROVED_JSON','[]'))
-        for key, discover in [('archive',discover_archive),('peertube',discover_peertube)]:
+        for key, discover in [('archive',discover_archive),('peertube',discover_peertube),('peertube',discover_global_peertube),('commons',discover_commons)]:
             try: approved.extend(discover())
             except Exception: status[key]['errors']+=1
         seen_entries=set()
@@ -89,7 +111,7 @@ def refresh():
             old=CACHE.get('items',[])
             for k in FETCHERS:
                 if status[k]['errors'] and not status[k]['count']:
-                    name={'archive':'Internet Archive','peertube':'PeerTube','dailymotion':'Dailymotion'}[k]
+                    name={'archive':'Internet Archive','peertube':'PeerTube','dailymotion':'Dailymotion','commons':'Wikimedia Commons'}[k]
                     retained=[x for x in old if x['channel']==name]; items.extend(retained); status[k]['count']=len(retained)
             CACHE.update(items=items,status=status)
     except Exception:
