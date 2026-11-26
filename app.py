@@ -348,10 +348,20 @@ def escape(value): return re.sub(r'[\r\n]+',' ',str(value)).replace('"',"'")
 @app.get('/')
 def home(): return jsonify({'service':'MEU IPTV Multi-Canais','routes':['/health','/playlist.m3u','/catalog.json','/series.json'],'channels':len(CHANNELS)})
 
+@app.after_request
+def catalog_no_cache(response):
+    from flask import request
+    if request.path in ('/health', '/catalog/health', '/private/v') or request.path.startswith('/private/c/'):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        response.headers['X-Catalog-Process'] = str(os.getpid())
+    return response
+
 @app.get('/health')
 def health():
     return jsonify({'status':'ok','api_key_configured':bool(os.getenv('YOUTUBE_API_KEY')),
-                    'cached_count':len(_cache['items']),'active_channel':_cache.get('active_channel'),'last_update':_cache['updated'],
+                    'process_id':os.getpid(),'cached_count':len(_cache['items']),'active_channel':_cache.get('active_channel'),'last_update':_cache['updated'],
                     'last_error':_cache['error'],'channels':_cache['channels'],
                     'quota_wait_until_utc':datetime.fromtimestamp(_quota['retry_at'], timezone.utc).isoformat() if _quota['retry_at'] > time.time() else None})
 

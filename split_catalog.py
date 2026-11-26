@@ -32,14 +32,18 @@ def install(app, playlist, private):
     from flask import Response, jsonify
     lock = threading.Lock()
     snapshot = {}
-    status = {'stage':'starting','error':None,'refresh_error':None}
+    status = {'stage':'starting','error':None,'refresh_error':None,'process_id':os.getpid(),'youtube_count':0,'channels_completed':0}
     path = Path(os.getenv('IPTV_PLAYLIST_PATH') or str(Path(__file__).resolve().with_name('ReelSeries_Organizado.m3u')))
     def state(**kw):
         with lock: status.update(kw)
         app.logger.warning('Catalog status: %s', kw)
-    def publish(lines):
-        for kind, value in build(lines):
-            with lock: snapshot[kind] = value
+    def publish(lines, **progress):
+        prepared = dict(build(lines))
+        with lock:
+            snapshot.update(prepared)
+            status.update(progress)
+            status['published_at'] = time.time()
+        for kind, value in prepared.items():
             app.logger.warning('Catalog %s ready: %d', kind, value[2])
     def local():
         state(stage='reading_local', file_exists=path.is_file(), file_bytes=path.stat().st_size if path.is_file() else 0)
@@ -77,8 +81,7 @@ def install(app, playlist, private):
                 def progress(lines, channels):
                     from itertools import chain
                     with path.open(encoding='utf-8-sig') as source:
-                        publish(chain(source, lines))
-                    state(stage='refreshing_external', channels_completed=len(channels), youtube_count=sum(c.get('count',0) for c in channels))
+                        publish(chain(source, lines), stage='refreshing_external', channels_completed=len(channels), youtube_count=sum(c.get('count',0) for c in channels))
                 with app.test_request_context():
                     progressive = getattr(playlist, 'progressive', None)
                     if progressive:
