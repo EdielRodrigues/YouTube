@@ -26,7 +26,29 @@ def install(app, playlist):
         n = phone(a.username or '')
         if len(n) not in (10,11) or not a.password or len(a.password)>256: return False
         row = db().collection('iptvClientesPrivados').document(n).get().to_dict() or {}
-        return row if valid(row) and check_password_hash(row.get('senhaHash',''), a.password) else False
+        if not valid(row) or not check_password_hash(row.get('senhaHash',''), a.password): return False
+        device = request.headers.get('X-IPTV-Device', '')
+        if not re.fullmatch(r'[a-f0-9-]{36}', device): return False
+        ref = db().collection('iptvClientesPrivados').document(n)
+        @firestore.transactional
+        def claim(tx):
+            current = ref.get(transaction=tx).to_dict() or {}
+            if not valid(current) or current.get('senhaHash') != row.get('senhaHash'): return False
+            now = datetime.now(timezone.utc)
+            devices = {k:v for k,v in current.get('dispositivos', {}).items() if v > now - timedelta(minutes=5)}
+            if device not in devices and len(devices) >= current.get('maxConexoes',1): return False
+            devices[device] = now
+            changes = dict(dispositivos=devices, ultimaConexao=now)
+            if not current.get('primeiraConexao'): changes['primeiraConexao'] = now
+            if not current.get('inicioEm'): changes['inicioEm'] = current.get('criadoEm') or now
+            name = request.headers.get('X-IPTV-Profile', '')
+            if request.path == '/private/account' and name:
+                from urllib.parse import unquote
+                name = unquote(name).strip()[:200]
+                if name: changes['nome'] = name
+            tx.update(ref, changes)
+            return dict(current, **changes)
+        return claim(db().transaction())
     def private(handler):
         try:
             if not authorize(): return jsonify(error='Acesso negado'), 401
@@ -39,7 +61,7 @@ def install(app, playlist):
     def account():
         def info():
             row = authorize()
-            return jsonify(status='Active', expiracao=str(int(row['expiracao'].timestamp())) if row.get('expiracao') else '', maxConexoes=row.get('maxConexoes',1), conexoesAtivas=0)
+            return jsonify(status='Active', expiracao=str(int(row['expiracao'].timestamp())) if row.get('expiracao') else '', maxConexoes=row.get('maxConexoes',1), conexoesAtivas=len(row.get("dispositivos", {})), criadoEm=row.get("criadoEm").isoformat() if row.get("criadoEm") else "", inicioEm=row.get("inicioEm").isoformat() if row.get("inicioEm") else "", primeiraConexao=row.get("primeiraConexao").isoformat() if row.get("primeiraConexao") else "")
         return private(info)
     @app.get('/private/playlist.m3u')
     def private_catalog(): return private(playlist)
@@ -66,11 +88,11 @@ def install(app, playlist):
         if not admin(): return jsonify(error='Acesso negado'),403
         data = request.get_json(silent=True) or {}
         n = phone(data.get('telefone','')); name = str(data.get('nome','')).strip(); password = str(data.get('senha',''))
-        if len(n) not in (10,11) or not name or not 8<=len(password)<=256: return jsonify(error='Dados inválidos'),400
+        if len(n) not in (10,11) or len(name)>200 or not 8<=len(password)<=256: return jsonify(error='Dados inválidos'),400
         max_conn = data.get('maxConexoes',1); minutes = data.get('minutos',43200)
         if type(max_conn) is not int or not 1 <= max_conn <= 100 or type(minutes) is not int or not (minutes in (60,120) or 1440 <= minutes <= 5256000 and minutes % 1440 == 0): return jsonify(error='Limites inválidos'),400
         now = datetime.now(timezone.utc)
-        row = {'nome':name,'telefone':n,'senhaHash':generate_password_hash(password),'ativo':True,'maxConexoes':max_conn,'criadoEm':now,'expiracao':now+timedelta(minutes=minutes),'playlistToken':secrets.token_urlsafe(32)}
+        row = {'nome':name,'telefone':n,'senhaHash':generate_password_hash(password),'ativo':True,'maxConexoes':max_conn,'criadoEm':now,'inicioEm':now,'expiracao':now+timedelta(minutes=minutes),'playlistToken':secrets.token_urlsafe(32)}
         ref = db().collection('iptvClientesPrivados').document(n)
         from google.api_core.exceptions import AlreadyExists
         try: ref.create(row)
@@ -83,7 +105,7 @@ def install(app, playlist):
         n = phone(telephone)
         data = request.get_json(silent=True) or {}
         name = data.get('nome'); label = data.get('assinatura'); maximum = data.get('maxConexoes'); active = data.get('ativo'); expiry = data.get('expiracao')
-        if len(n) not in (10,11) or not isinstance(name,str) or not 1 <= len(name.strip()) <= 200 or not isinstance(label,str) or len(label)>200 or type(maximum) is not int or not 1 <= maximum <= 100 or type(active) is not bool or not isinstance(expiry,str): return jsonify(error='Dados inválidos'),400
+        if len(n) not in (10,11) or not isinstance(name,str) or not 0 <= len(name.strip()) <= 200 or not isinstance(label,str) or len(label)>200 or type(maximum) is not int or not 1 <= maximum <= 100 or type(active) is not bool or not isinstance(expiry,str): return jsonify(error='Dados inválidos'),400
         try:
             end = datetime.fromisoformat(expiry.replace('Z','+00:00')) if expiry else None
             if end and end.tzinfo is None: raise ValueError()
@@ -94,6 +116,14 @@ def install(app, playlist):
         if end is not None: changes['expiracao'] = end.astimezone(timezone.utc)
         ref.update(changes)
         return jsonify(public(ref.get().to_dict()))
+
+    @app.delete('/admin/iptv/clientes/<telephone>')
+    def delete_client(telephone):
+        if not admin(): return jsonify(error='Acesso negado'),403
+        n = phone(telephone)
+        if len(n) not in (10,11): return jsonify(error='Dados inválidos'),400
+        db().collection('iptvClientesPrivados').document(n).delete()
+        return '',204
 
     from split_catalog import install as install_split
     install_split(app, playlist, private)
