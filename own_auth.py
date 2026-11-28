@@ -21,7 +21,7 @@ def install(app, playlist):
     def public(row):
         now = datetime.now(timezone.utc)
         devices = {k:v for k,v in row.get('dispositivos', {}).items() if v > now - timedelta(minutes=5)} if valid(row) else {}
-        return {"online": bool(devices), "conexoesAtivas": len(devices), "ultimaConexao": row['ultimaConexao'].isoformat() if row.get('ultimaConexao') else "", "ativo": row.get("ativo", False), "assinatura": row.get("assinatura", "MEU IPTV PRO"), "nome": row.get("nome", ""), "telefone": row.get("telefone", ""), "maxConexoes": row.get("maxConexoes", 1), "criadoEm": row["criadoEm"].isoformat() if row.get("criadoEm") else "", "expiracao": row["expiracao"].isoformat() if row.get("expiracao") else "", "playlist": request.url_root.rstrip("/") + "/private/list/" + row["playlistToken"] + ".m3u" if row.get("playlistToken") else ""}
+        return {"firebaseUids": list(set(row.get("firebaseUids", {}).values())), "inicioEm": row["inicioEm"].isoformat() if row.get("inicioEm") else "", "primeiraConexao": row["primeiraConexao"].isoformat() if row.get("primeiraConexao") else "", "online": bool(devices), "conexoesAtivas": len(devices), "ultimaConexao": row['ultimaConexao'].isoformat() if row.get('ultimaConexao') else "", "ativo": row.get("ativo", False), "assinatura": row.get("assinatura", "MEU IPTV PRO"), "nome": row.get("nome", ""), "telefone": row.get("telefone", ""), "maxConexoes": row.get("maxConexoes", 1), "criadoEm": row["criadoEm"].isoformat() if row.get("criadoEm") else "", "expiracao": row["expiracao"].isoformat() if row.get("expiracao") else "", "playlist": request.url_root.rstrip("/") + "/private/list/" + row["playlistToken"] + ".m3u" if row.get("playlistToken") else ""}
     def authorize():
         a = request.authorization
         if not a or a.type != 'basic': return False
@@ -31,6 +31,11 @@ def install(app, playlist):
         if not valid(row) or not check_password_hash(row.get('senhaHash',''), a.password): return False
         device = request.headers.get('X-IPTV-Device', '')
         if not re.fullmatch(r'[a-f0-9-]{36}', device): return False
+        token = request.headers.get('X-Firebase-Token', '')
+        uid = None
+        if token:
+            try: uid = auth.verify_id_token(token, check_revoked=True)['uid']
+            except Exception: return False
         ref = db().collection('iptvClientesPrivados').document(n)
         @firestore.transactional
         def claim(tx):
@@ -41,6 +46,10 @@ def install(app, playlist):
             if device not in devices and len(devices) >= current.get('maxConexoes',1): return False
             devices[device] = now
             changes = dict(dispositivos=devices, ultimaConexao=now)
+            if uid:
+                bindings = dict(current.get('firebaseUids', {}))
+                bindings[device] = uid
+                changes['firebaseUids'] = bindings
             if not current.get('primeiraConexao'): changes['primeiraConexao'] = now
             if not current.get('inicioEm'): changes['inicioEm'] = current.get('criadoEm') or now
             name = request.headers.get('X-IPTV-Profile', '')
@@ -63,6 +72,7 @@ def install(app, playlist):
     def account():
         def info():
             row = authorize()
+            if not row: return jsonify(error="Acesso negado"), 401
             return jsonify(status='Active', expiracao=str(int(row['expiracao'].timestamp())) if row.get('expiracao') else '', maxConexoes=row.get('maxConexoes',1), conexoesAtivas=len(row.get("dispositivos", {})), criadoEm=row.get("criadoEm").isoformat() if row.get("criadoEm") else "", inicioEm=row.get("inicioEm").isoformat() if row.get("inicioEm") else "", primeiraConexao=row.get("primeiraConexao").isoformat() if row.get("primeiraConexao") else "")
         return private(info)
     @app.get('/private/playlist.m3u')
