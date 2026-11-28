@@ -19,7 +19,9 @@ def install(app, playlist):
         expiry = row.get("expiracao")
         return row.get("ativo") is True and (not expiry or expiry > datetime.now(timezone.utc))
     def public(row):
-        return {"ativo": row.get("ativo", False), "assinatura": row.get("assinatura", "MEU IPTV PRO"), "nome": row.get("nome", ""), "telefone": row.get("telefone", ""), "maxConexoes": row.get("maxConexoes", 1), "criadoEm": row["criadoEm"].isoformat() if row.get("criadoEm") else "", "expiracao": row["expiracao"].isoformat() if row.get("expiracao") else "", "playlist": request.url_root.rstrip("/") + "/private/list/" + row["playlistToken"] + ".m3u" if row.get("playlistToken") else ""}
+        now = datetime.now(timezone.utc)
+        devices = {k:v for k,v in row.get('dispositivos', {}).items() if v > now - timedelta(minutes=5)} if valid(row) else {}
+        return {"online": bool(devices), "conexoesAtivas": len(devices), "ultimaConexao": row['ultimaConexao'].isoformat() if row.get('ultimaConexao') else "", "ativo": row.get("ativo", False), "assinatura": row.get("assinatura", "MEU IPTV PRO"), "nome": row.get("nome", ""), "telefone": row.get("telefone", ""), "maxConexoes": row.get("maxConexoes", 1), "criadoEm": row["criadoEm"].isoformat() if row.get("criadoEm") else "", "expiracao": row["expiracao"].isoformat() if row.get("expiracao") else "", "playlist": request.url_root.rstrip("/") + "/private/list/" + row["playlistToken"] + ".m3u" if row.get("playlistToken") else ""}
     def authorize():
         a = request.authorization
         if not a or a.type != 'basic': return False
